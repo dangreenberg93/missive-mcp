@@ -63,7 +63,7 @@ npm run remote
 | `ENCRYPTION_KEY` | Yes | 32-byte hex string for AES-256-GCM PAT encryption |
 | `BASE_URL` | Yes | Public URL of the server |
 | `PORT` | No | HTTP port (default 3000) |
-| `DATA_DIR` | No | Directory for storage files (default `./data`) |
+| `MCP_INSTRUCTIONS_PROFILE` | No | `all`, `pbd`, `voyager`, or `base` (default `all`) |
 
 Point MCP clients at `{BASE_URL}/mcp`. The server handles OAuth automatically:
 
@@ -101,13 +101,13 @@ PATs are encrypted at rest with AES-256-GCM. OAuth tokens expire after 1 hour (r
 | `get_conversation_timeline` | Get all messages, posts, and comments as a unified chronological timeline |
 | `get_message` | Get full message content (with body truncation options) |
 
-### Drafts
+### Drafts (draft-only — no send)
 
 | Tool | Description |
 |------|-------------|
+| `reply_to_conversation` | **Preferred for thread replies** — auto-sets recipients, subject, quoting |
 | `list_drafts` | List drafts in a conversation |
-| `create_draft` | Create a draft (not sent) |
-| `send_message` | Send a message immediately (rate limited) |
+| `create_draft` | Create a draft for a new outbound message |
 | `delete_draft` | Delete an unsent draft |
 
 ### Contacts
@@ -136,7 +136,7 @@ Use list_conversations with inbox=true to see recent conversations.
 ```
 1. Use list_conversations to find the conversation
 2. Use get_conversation_timeline to see the full thread (messages + team activity)
-3. Use send_message with the conversation ID to reply
+3. Use reply_to_conversation with the conversation ID — draft only, human sends from Missive
 ```
 
 ### Search for emails from a domain
@@ -151,9 +151,24 @@ Use list_conversations with domain="example.com"
 3. Use create_post with add_assignees=[user_id]
 ```
 
+### HTML formatting in drafts
+When composing HTML email bodies with `reply_to_conversation` or `create_draft`, use `<br><br>` between paragraphs. Do not wrap content in `<p>`, `<div>`, or style blocks — Missive strips these and renders the content without spacing.
+
+### Outbound message bodies
+`get_message` uses `GET /messages/{id}` for full bodies. Outbound messages sent via the API may return 404 on that endpoint — pass `conversation_id` to fall back to the timeline entry (preview only).
+
+## Org-specific instructions
+
+The server loads MCP instructions from:
+
+- `instructions.md` — shared Missive + safety rules
+- `instructions-pbd.md` — Pale Blue Dot voice and workflow
+- `instructions-voyager.md` — Voyager voice and workflow
+
+Set `MCP_INSTRUCTIONS_PROFILE=all` (default), `pbd`, `voyager`, or `base`.
+
 ## Rate Limits
 
-- `send_message`: 10 per minute, 100 per hour (client-enforced)
 - Missive API rate limits are undocumented; the client handles 429 responses
 
 ## Security

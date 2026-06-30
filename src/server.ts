@@ -30,6 +30,7 @@ import { registerMessageTools } from './tools/messages.js';
 import { registerDraftTools } from './tools/drafts.js';
 import { registerContactTools } from './tools/contacts.js';
 import { registerManagementTools } from './tools/management.js';
+import { loadMcpInstructions } from './instructions.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -65,12 +66,7 @@ const resolveClient: ClientResolver = (extra) => {
 // --- MCP Server factory ---
 
 function createMcpServer(): McpServer {
-  let instructions: string;
-  try {
-    instructions = readFileSync(join(__dirname, '..', 'instructions.md'), 'utf-8');
-  } catch {
-    instructions = '';
-  }
+  const instructions = loadMcpInstructions();
 
   const server = new McpServer(
     { name: 'missive-mcp', version: '1.0.0' },

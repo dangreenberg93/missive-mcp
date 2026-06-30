@@ -6,14 +6,10 @@
  * Reads MISSIVE_API_TOKEN from env for single-user local mode.
  */
 
-import { readFileSync } from 'fs';
-import { dirname, join } from 'path';
-import { fileURLToPath } from 'url';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { getClient } from './client.js';
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
+import { loadMcpInstructions } from './instructions.js';
 import { registerReferenceTools } from './tools/reference.js';
 import { registerConversationTools } from './tools/conversations.js';
 import { registerMessageTools } from './tools/messages.js';
@@ -33,10 +29,7 @@ async function main() {
     process.exit(1);
   }
 
-  const instructions = readFileSync(
-    join(__dirname, '..', 'instructions.md'),
-    'utf-8'
-  );
+  const instructions = loadMcpInstructions();
 
   const server = new McpServer(
     {

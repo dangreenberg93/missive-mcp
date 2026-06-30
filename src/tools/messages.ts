@@ -18,7 +18,10 @@ import {
   getCachedItems,
   getCacheBounds,
   getCacheStats,
+  clearMessageCache,
 } from '../cache.js';
+import { NotFoundError } from '../errors.js';
+import type { MissiveClient } from '../client.js';
 
 /**
  * Strip HTML tags and normalize whitespace
@@ -65,6 +68,126 @@ function processBody(
   return processed;
 }
 
+function normalizeMessagesResponse(
+  data: MessageResponse | { messages: Message | Message[] }
+): Message[] {
+  const { messages } = data;
+  if (!messages) return [];
+  return Array.isArray(messages) ? messages : [messages];
+}
+
+async function findMessageInConversation(
+  client: MissiveClient,
+  conversationId: string,
+  messageId: string
+): Promise<Message | undefined> {
+  let cursor: string | undefined;
+
+  while (true) {
+    const params: { limit: number; until?: string } = { limit: 10 };
+    if (cursor) params.until = cursor;
+
+    const response = await client.get<{ messages: Message[] }>(
+      `/conversations/${conversationId}/messages`,
+      params
+    );
+
+    if (response.messages.length === 0) break;
+
+    const match = response.messages.find((m) => m.id === messageId);
+    if (match) return match;
+
+    if (response.messages.length < 10) break;
+
+    const last = response.messages[response.messages.length - 1];
+    cursor = String(last.delivered_at || 0);
+  }
+
+  return undefined;
+}
+
+async function hydrateMessageBodies(
+  client: MissiveClient,
+  messages: Message[]
+): Promise<Map<string, string>> {
+  const bodies = new Map<string, string>();
+  const ids = messages.map((m) => m.id);
+
+  for (let i = 0; i < ids.length; i += 10) {
+    const batch = ids.slice(i, i + 10);
+
+    try {
+      const data = await client.get<MessageResponse | { messages: Message | Message[] }>(
+        `/messages/${batch.join(',')}`
+      );
+      for (const message of normalizeMessagesResponse(data)) {
+        if (message.body) {
+          bodies.set(message.id, message.body);
+        }
+      }
+    } catch (error) {
+      if (!(error instanceof NotFoundError)) {
+        throw error;
+      }
+
+      // Batch may fail if any ID is missing; try individually
+      for (const id of batch) {
+        try {
+          const data = await client.get<MessageResponse | { messages: Message | Message[] }>(
+            `/messages/${id}`
+          );
+          const message = normalizeMessagesResponse(data)[0];
+          if (message?.body) {
+            bodies.set(message.id, message.body);
+          }
+        } catch (individualError) {
+          if (!(individualError instanceof NotFoundError)) {
+            throw individualError;
+          }
+        }
+      }
+    }
+  }
+
+  return bodies;
+}
+
+function formatMessageResult(
+  message: Message,
+  body_format: 'full' | 'truncated' | 'preview',
+  strip_html: boolean,
+  max_body_length: number,
+  source: 'message' | 'timeline' = 'message'
+) {
+  const rawBody = message.body || message.preview;
+  const processedBody = processBody(
+    rawBody,
+    body_format,
+    strip_html,
+    max_body_length
+  );
+
+  return {
+    id: message.id,
+    subject: message.subject,
+    body: processedBody,
+    from_field: message.from_field,
+    to_fields: message.to_fields,
+    cc_fields: message.cc_fields,
+    delivered_at: message.delivered_at,
+    attachments: message.attachments?.map((a) => ({
+      id: a.id,
+      filename: a.filename,
+      size: a.size,
+      content_type: a.content_type,
+    })),
+    conversation: message.conversation,
+    ...(source === 'timeline' && !message.body
+      ? { note: 'Full body unavailable via GET /messages; returned preview from conversation timeline' }
+      : {}),
+  };
+}
+
 function userPrefix(extra: { authInfo?: { extra?: Record<string, unknown> } }): string {
   return (extra.authInfo?.extra?.userId as string) || 'default';
 }
@@ -82,9 +205,18 @@ Body format options:
 - truncated: Truncates body to max_body_length (default)
 - preview: Returns first 500 characters only
 
-Use strip_html=true (default) to convert HTML to plain text.`,
+Use strip_html=true (default) to convert HTML to plain text.
+
+For outbound messages sent via the API, GET /messages/{id} may return 404. Pass conversation_id to fall back to the conversation timeline entry (preview only for outbound).`,
       inputSchema: {
         message_id: z.string().uuid().describe('The message ID to retrieve'),
+        conversation_id: z
+          .string()
+          .uuid()
+          .optional()
+          .describe(
+            'Conversation ID (required fallback for outbound messages that 404 on GET /messages/{id})'
+          ),
         body_format: z
           .enum(['full', 'truncated', 'preview'])
           .default('truncated')
@@ -101,47 +233,45 @@ Use strip_html=true (default) to convert HTML to plain text.`,
           .describe('Maximum body length for truncated format'),
       },
     },
-    async ({ message_id, body_format, strip_html, max_body_length }, extra) => {
-      const data = await getClient(extra).get<MessageResponse>(
-        `/messages/${message_id}`
-      );
+    async ({ message_id, conversation_id, body_format, strip_html, max_body_length }, extra) => {
+      const client = getClient(extra);
+      let message: Message | undefined;
 
-      const message = data.messages?.[0];
+      try {
+        const data = await client.get<MessageResponse | { messages: Message | Message[] }>(
+          `/messages/${message_id}`
+        );
+        message = normalizeMessagesResponse(data)[0];
+      } catch (error) {
+        if (error instanceof NotFoundError && conversation_id) {
+          message = await findMessageInConversation(client, conversation_id, message_id);
+        } else {
+          throw error;
+        }
+      }
+
       if (!message) {
         return {
           content: [
             {
               type: 'text' as const,
-              text: `Message not found: ${message_id}`,
+              text: conversation_id
+                ? `Message not found: ${message_id} (also checked conversation ${conversation_id})`
+                : `Message not found: ${message_id}. Pass conversation_id for outbound message fallback.`,
             },
           ],
           isError: true,
         };
       }
 
-      const processedBody = processBody(
-        message.body,
+      const source = message.body ? 'message' : 'timeline';
+      const result = formatMessageResult(
+        message,
         body_format,
         strip_html,
-        max_body_length
+        max_body_length,
+        source
       );
-
-      const result = {
-        id: message.id,
-        subject: message.subject,
-        body: processedBody,
-        from_field: message.from_field,
-        to_fields: message.to_fields,
-        cc_fields: message.cc_fields,
-        delivered_at: message.delivered_at,
-        attachments: message.attachments?.map((a) => ({
-          id: a.id,
-          filename: a.filename,
-          size: a.size,
-          content_type: a.content_type,
-        })),
-        conversation: message.conversation,
-      };
 
       return {
         content: [
@@ -167,9 +297,11 @@ Each item has a "type" field ("message", "post", or "comment") to identify what 
 
 Uses smart caching: stops fetching when hitting cached data.
 
+When body_format is "truncated", full message bodies are fetched via GET /messages/{id} because the conversation messages list only includes short previews (~140 chars).
+
 To paginate backwards: pass older_than with the oldest_timestamp from the previous response.
 
-Use get_message with a specific message ID if you need the full body content.`,
+Use get_message with message_id and conversation_id if you need a single message outside the timeline.`,
       inputSchema: {
         conversation_id: z
           .string()
@@ -322,6 +454,17 @@ Use get_message with a specific message ID if you need the full body content.`,
       fetchedPosts = postCount;
       fetchedComments = commentCount;
 
+      const statsBeforeHydration = getCacheStats(cacheKey);
+      if (
+        body_format === 'truncated' &&
+        fetchedMessages === 0 &&
+        statsBeforeHydration &&
+        statsBeforeHydration.messages > 0
+      ) {
+        clearMessageCache(cacheKey);
+        fetchedMessages = await fetchMessages(startCursor);
+      }
+
       // Build timeline from cache
       const updatedMsgBounds = getCacheBounds(cache.messages);
       const messages = getCachedItems(
@@ -334,6 +477,11 @@ Use get_message with a specific message ID if you need the full body content.`,
         (c: Comment) => c.created_at
       );
 
+      let hydratedBodies: Map<string, string> | undefined;
+      if (body_format === 'truncated' && messages.length > 0) {
+        hydratedBodies = await hydrateMessageBodies(client, messages);
+      }
+
       // Determine time window for timeline (based on messages)
       const oldestMessageTime = updatedMsgBounds.hasItems ? updatedMsgBounds.oldest : 0;
 
@@ -341,8 +489,9 @@ Use get_message with a specific message ID if you need the full body content.`,
       const timeline: TimelineItem[] = [];
 
       for (const m of messages) {
+        const rawBody = hydratedBodies?.get(m.id) || m.body || m.preview;
         const processedBody = processBody(
-          m.preview || m.body,
+          rawBody,
           body_format,
           strip_html,
           max_body_length

@@ -111,7 +111,8 @@ export interface Message {
   bcc_fields?: EmailAddress[];
   delivered_at?: number;
   attachments?: Attachment[];
-  conversation?: string;
+  author?: User;
+  conversation?: string | { id: string };
 }
 
 export interface MessagesResponse extends PaginatedResponse<Message> {

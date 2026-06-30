@@ -118,6 +118,16 @@ export function clearCache(conversationId: string): void {
 }
 
 /**
+ * Clear only cached messages for a conversation (forces re-fetch from Missive)
+ */
+export function clearMessageCache(conversationId: string): void {
+  const conv = cache.get(conversationId);
+  if (conv) {
+    conv.messages = createEmptyCachedType();
+  }
+}
+
+/**
  * Get cache stats for debugging
  */
 export function getCacheStats(conversationId: string): {
