@@ -9,6 +9,7 @@ import type {
   ConversationsResponse,
   ConversationResponse,
 } from '../types/missive.js';
+import { buildTeamInboxStats, resolveTeam } from '../conversation-stats.js';
 
 export function registerConversationTools(server: McpServer, getClient: ClientResolver): void {
   // list_conversations
@@ -164,6 +165,83 @@ Note: email and domain are mutually exclusive.`,
           },
         ],
       };
+    }
+  );
+
+  // get_team_inbox_stats
+  server.registerTool(
+    'get_team_inbox_stats',
+    {
+      title: 'Get Team Inbox Stats',
+      description: `Aggregates team inbox health for open/unassigned workload validation.
+
+Returns:
+- unassigned_inbox: full team_inbox queue (unassigned shared inbox)
+- active_assigned: open workload by person using users[].assigned (not stale assignees[])
+- hot_flags: open conversations with a shared label matching %hot% (case-insensitive)
+- hot_flags.open_hot_snoozed: hot items where any user has snoozed=true
+
+Use team_name (partial match) or team_id. Paginates up to max_pages (50 convs/page).`,
+      inputSchema: {
+        team_id: z.string().uuid().optional().describe('Team UUID'),
+        team_name: z
+          .string()
+          .optional()
+          .describe('Team name partial match (e.g. "Maazah")'),
+        organization_id: z
+          .string()
+          .uuid()
+          .optional()
+          .describe('Organization UUID for team lookup (defaults to first org)'),
+        max_pages: z
+          .number()
+          .min(1)
+          .max(40)
+          .default(20)
+          .describe('Max pages to fetch per view (50 conversations/page)'),
+      },
+    },
+    async (params, extra) => {
+      if (!params.team_id && !params.team_name) {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: 'Error: provide team_id or team_name',
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      try {
+        const client = getClient(extra);
+        const team = await resolveTeam(client, {
+          teamId: params.team_id,
+          teamName: params.team_name,
+          organizationId: params.organization_id,
+        });
+        const stats = await buildTeamInboxStats(client, team, params.max_pages);
+
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: JSON.stringify(stats, null, 2),
+            },
+          ],
+        };
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: error instanceof Error ? error.message : 'Failed to get team inbox stats',
+            },
+          ],
+          isError: true,
+        };
+      }
     }
   );
 

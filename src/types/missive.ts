@@ -64,18 +64,35 @@ export interface SharedLabelsResponse {
 }
 
 // Conversation
+export interface ConversationUser {
+  id?: string;
+  email?: string;
+  name?: string;
+  assigned?: boolean;
+  unassigned?: boolean;
+  closed?: boolean;
+  archived?: boolean;
+  snoozed?: boolean;
+  flagged?: boolean;
+}
+
 export interface Conversation {
   id: string;
   subject?: string;
   latest_message_subject?: string;
   assignees?: User[];
+  assignee_emails?: string;
   shared_labels?: SharedLabel[];
+  shared_label_names?: string | string[];
+  users?: ConversationUser[];
   team?: Team;
   organization?: Organization;
   created_at: number;
   last_activity_at: number;
   messages_count: number;
   attachments_count?: number;
+  drafts_count?: number;
+  closed_at?: number | null;
   closed?: boolean;
 }
 
