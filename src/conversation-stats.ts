@@ -26,9 +26,47 @@ export interface HotFlagItem {
   last_activity_at: number;
 }
 
+export type ExceptionSeverity = 'critical' | 'warning' | 'info';
+
+export type InboxExceptionType =
+  | 'hot_open'
+  | 'hot_snoozed'
+  | 'unassigned_queue_high'
+  | 'stale_unassigned'
+  | 'active_workload_high'
+  | 'stats_truncated';
+
+export interface ExceptionThresholds {
+  /** Warn when unassigned inbox count exceeds this (default 10). */
+  unassigned_warning: number;
+  /** Critical when unassigned inbox count exceeds this (default 50). */
+  unassigned_critical: number;
+  /** Flag unassigned queue items older than this many hours (default 48). */
+  stale_unassigned_hours: number;
+  /** Warn when one person has more than this many active assigned conversations (default 40). */
+  active_workload_warning: number;
+}
+
+export const DEFAULT_EXCEPTION_THRESHOLDS: ExceptionThresholds = {
+  unassigned_warning: 10,
+  unassigned_critical: 50,
+  stale_unassigned_hours: 48,
+  active_workload_warning: 40,
+};
+
+export interface InboxException {
+  type: InboxExceptionType;
+  severity: ExceptionSeverity;
+  message: string;
+  conversation_id?: string;
+  subject?: string;
+  details?: Record<string, string | number | boolean | string[]>;
+}
+
 export interface TeamInboxStats {
   team: { id: string; name: string };
   as_of: string;
+  thresholds: ExceptionThresholds;
   unassigned_inbox: {
     count: number;
     truncated: boolean;
@@ -48,6 +86,11 @@ export interface TeamInboxStats {
     open_not_closed: HotFlagItem[];
     /** Subset of hot_flags that are also snoozed by at least one user. */
     open_hot_snoozed: HotFlagItem[];
+  };
+  exceptions: {
+    count: number;
+    by_severity: Record<ExceptionSeverity, number>;
+    items: InboxException[];
   };
 }
 
@@ -194,10 +237,157 @@ async function listTeams(client: MissiveClient, organizationId?: string): Promis
   return data.teams ?? [];
 }
 
+function hoursSince(timestamp: number, nowMs: number = Date.now()): number {
+  return (nowMs - timestamp * 1000) / (1000 * 60 * 60);
+}
+
+export function detectInboxExceptions(
+  input: {
+    queue: UnassignedQueueItem[];
+    unassignedTruncated: boolean;
+    openTruncated: boolean;
+    openHotFlags: HotFlagItem[];
+    openHotSnoozed: HotFlagItem[];
+    activeAssigned: Record<string, number>;
+  },
+  thresholds: ExceptionThresholds = DEFAULT_EXCEPTION_THRESHOLDS,
+  nowMs: number = Date.now()
+): InboxException[] {
+  const exceptions: InboxException[] = [];
+
+  if (input.unassignedTruncated) {
+    exceptions.push({
+      type: 'stats_truncated',
+      severity: 'warning',
+      message: 'Unassigned inbox count may be incomplete (pagination limit reached).',
+      details: { view: 'team_inbox' },
+    });
+  }
+
+  if (input.openTruncated) {
+    exceptions.push({
+      type: 'stats_truncated',
+      severity: 'info',
+      message: 'Open conversation scan may be incomplete (pagination limit reached).',
+      details: { view: 'team_all' },
+    });
+  }
+
+  const unassignedCount = input.queue.length;
+  if (unassignedCount >= thresholds.unassigned_critical) {
+    exceptions.push({
+      type: 'unassigned_queue_high',
+      severity: 'critical',
+      message: `${unassignedCount} unassigned conversations in team inbox (threshold: ${thresholds.unassigned_critical}).`,
+      details: { count: unassignedCount, threshold: thresholds.unassigned_critical },
+    });
+  } else if (unassignedCount >= thresholds.unassigned_warning) {
+    exceptions.push({
+      type: 'unassigned_queue_high',
+      severity: 'warning',
+      message: `${unassignedCount} unassigned conversations in team inbox (threshold: ${thresholds.unassigned_warning}).`,
+      details: { count: unassignedCount, threshold: thresholds.unassigned_warning },
+    });
+  }
+
+  for (const item of input.queue) {
+    const ageHours = hoursSince(item.last_activity_at, nowMs);
+    if (ageHours >= thresholds.stale_unassigned_hours) {
+      exceptions.push({
+        type: 'stale_unassigned',
+        severity: ageHours >= thresholds.stale_unassigned_hours * 2 ? 'critical' : 'warning',
+        message: `Unassigned inbox item is ${Math.round(ageHours)}h old (threshold: ${thresholds.stale_unassigned_hours}h).`,
+        conversation_id: item.id,
+        subject: item.subject,
+        details: {
+          age_hours: Math.round(ageHours),
+          threshold_hours: thresholds.stale_unassigned_hours,
+          labels: item.labels.join(', '),
+        },
+      });
+    }
+  }
+
+  for (const flag of input.openHotFlags) {
+    exceptions.push({
+      type: 'hot_open',
+      severity: 'warning',
+      message: `Open conversation has Hot label: ${flag.hot_labels.join(', ')}.`,
+      conversation_id: flag.id,
+      subject: flag.subject,
+      details: {
+        hot_labels: flag.hot_labels,
+        assignees: flag.assignees,
+      },
+    });
+  }
+
+  for (const flag of input.openHotSnoozed) {
+    exceptions.push({
+      type: 'hot_snoozed',
+      severity: 'critical',
+      message: `Hot conversation is snoozed by ${flag.snoozed_by.join(', ')}.`,
+      conversation_id: flag.id,
+      subject: flag.subject,
+      details: {
+        hot_labels: flag.hot_labels,
+        snoozed_by: flag.snoozed_by,
+        assignees: flag.assignees,
+      },
+    });
+  }
+
+  for (const [email, count] of Object.entries(input.activeAssigned)) {
+    if (count >= thresholds.active_workload_warning) {
+      exceptions.push({
+        type: 'active_workload_high',
+        severity: count >= thresholds.active_workload_warning * 2 ? 'critical' : 'warning',
+        message: `${email} has ${count} active assigned conversations (threshold: ${thresholds.active_workload_warning}).`,
+        details: {
+          email,
+          count,
+          threshold: thresholds.active_workload_warning,
+        },
+      });
+    }
+  }
+
+  const severityRank: Record<ExceptionSeverity, number> = {
+    critical: 0,
+    warning: 1,
+    info: 2,
+  };
+
+  return exceptions.sort((a, b) => {
+    const bySeverity = severityRank[a.severity] - severityRank[b.severity];
+    if (bySeverity !== 0) return bySeverity;
+    return a.type.localeCompare(b.type);
+  });
+}
+
+function summarizeExceptions(items: InboxException[]): TeamInboxStats['exceptions'] {
+  const bySeverity: Record<ExceptionSeverity, number> = {
+    critical: 0,
+    warning: 0,
+    info: 0,
+  };
+
+  for (const item of items) {
+    bySeverity[item.severity] += 1;
+  }
+
+  return {
+    count: items.length,
+    by_severity: bySeverity,
+    items,
+  };
+}
+
 export async function buildTeamInboxStats(
   client: MissiveClient,
   team: Team,
-  maxPages: number
+  maxPages: number,
+  thresholds: ExceptionThresholds = DEFAULT_EXCEPTION_THRESHOLDS
 ): Promise<TeamInboxStats> {
   const [inboxPage, openPage] = await Promise.all([
     paginateTeamConversations(client, 'team_inbox', team.id, maxPages),
@@ -229,9 +419,22 @@ export async function buildTeamInboxStats(
 
   const openHotSnoozed = openHotFlags.filter((flag) => flag.snoozed_by.length > 0);
 
+  const exceptionItems = detectInboxExceptions(
+    {
+      queue,
+      unassignedTruncated: inboxPage.truncated,
+      openTruncated: openPage.truncated,
+      openHotFlags,
+      openHotSnoozed,
+      activeAssigned: sortedAssignees,
+    },
+    thresholds
+  );
+
   return {
     team: { id: team.id, name: team.name },
     as_of: new Date().toISOString(),
+    thresholds,
     unassigned_inbox: {
       count: queue.length,
       truncated: inboxPage.truncated,
@@ -250,5 +453,6 @@ export async function buildTeamInboxStats(
       open_not_closed: openHotFlags,
       open_hot_snoozed: openHotSnoozed,
     },
+    exceptions: summarizeExceptions(exceptionItems),
   };
 }

@@ -180,6 +180,7 @@ Returns:
 - active_assigned: open workload by person using users[].assigned (not stale assignees[])
 - hot_flags: open conversations with a shared label matching %hot% (case-insensitive)
 - hot_flags.open_hot_snoozed: hot items where any user has snoozed=true
+- exceptions: threshold-based flags (hot_open, hot_snoozed, unassigned_queue_high, stale_unassigned, active_workload_high)
 
 Use team_name (partial match) or team_id. Paginates up to max_pages (50 convs/page).`,
       inputSchema: {
@@ -199,6 +200,26 @@ Use team_name (partial match) or team_id. Paginates up to max_pages (50 convs/pa
           .max(40)
           .default(20)
           .describe('Max pages to fetch per view (50 conversations/page)'),
+        unassigned_warning: z
+          .number()
+          .min(0)
+          .default(10)
+          .describe('Warn when unassigned inbox count exceeds this'),
+        unassigned_critical: z
+          .number()
+          .min(0)
+          .default(50)
+          .describe('Critical when unassigned inbox count exceeds this'),
+        stale_unassigned_hours: z
+          .number()
+          .min(1)
+          .default(48)
+          .describe('Flag unassigned queue items older than this many hours'),
+        active_workload_warning: z
+          .number()
+          .min(1)
+          .default(40)
+          .describe('Warn when one person exceeds this many active assigned conversations'),
       },
     },
     async (params, extra) => {
@@ -221,7 +242,12 @@ Use team_name (partial match) or team_id. Paginates up to max_pages (50 convs/pa
           teamName: params.team_name,
           organizationId: params.organization_id,
         });
-        const stats = await buildTeamInboxStats(client, team, params.max_pages);
+        const stats = await buildTeamInboxStats(client, team, params.max_pages, {
+          unassigned_warning: params.unassigned_warning,
+          unassigned_critical: params.unassigned_critical,
+          stale_unassigned_hours: params.stale_unassigned_hours,
+          active_workload_warning: params.active_workload_warning,
+        });
 
         return {
           content: [
