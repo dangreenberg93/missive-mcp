@@ -166,6 +166,83 @@ export class MissiveClient {
   async delete<T>(path: string): Promise<T> {
     return this.request<T>(path, { method: 'DELETE' });
   }
+
+  /**
+   * Download a Missive signed attachment URL (requires Bearer auth).
+   */
+  async downloadSignedUrl(url: string, maxBytes: number): Promise<Uint8Array> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT);
+
+    try {
+      const response = await fetch(url, {
+        headers: {
+          Authorization: `Bearer ${this.token}`,
+        },
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        throw new MissiveAPIError(
+          `Attachment download failed: ${response.status}`,
+          response.status
+        );
+      }
+
+      const reader = response.body?.getReader();
+      if (!reader) {
+        const buffer = await response.arrayBuffer();
+        if (buffer.byteLength > maxBytes) {
+          throw new MissiveAPIError(
+            `Attachment exceeds max size (${maxBytes} bytes)`,
+            413,
+            'PAYLOAD_TOO_LARGE'
+          );
+        }
+        return new Uint8Array(buffer);
+      }
+
+      const chunks: Uint8Array[] = [];
+      let total = 0;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (!value) continue;
+        total += value.byteLength;
+        if (total > maxBytes) {
+          throw new MissiveAPIError(
+            `Attachment exceeds max size (${maxBytes} bytes)`,
+            413,
+            'PAYLOAD_TOO_LARGE'
+          );
+        }
+        chunks.push(value);
+      }
+
+      const merged = new Uint8Array(total);
+      let offset = 0;
+      for (const chunk of chunks) {
+        merged.set(chunk, offset);
+        offset += chunk.byteLength;
+      }
+      return merged;
+    } catch (error) {
+      if (error instanceof MissiveAPIError) {
+        throw error;
+      }
+      if (error instanceof Error && error.name === 'AbortError') {
+        throw new MissiveAPIError('Attachment download timeout', 408, 'TIMEOUT');
+      }
+      const safeMessage =
+        error instanceof Error
+          ? error.message.replace(this.token, '[REDACTED]')
+          : 'Unknown attachment download error';
+      throw new MissiveAPIError(safeMessage, 500, 'UNKNOWN');
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
 }
 
 // Per-token client cache using WeakRef for GC-friendly caching

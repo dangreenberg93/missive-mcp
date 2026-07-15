@@ -100,6 +100,8 @@ PATs are encrypted at rest with AES-256-GCM. OAuth tokens expire after 1 hour (r
 |------|-------------|
 | `get_conversation_timeline` | Get all messages, posts, and comments as a unified chronological timeline |
 | `get_message` | Get full message content (with body truncation options) |
+| `list_message_attachments` | List attachment metadata on a message |
+| `download_attachment` | Download attachment bytes as base64 (for Voyager upload, etc.) |
 
 ### Drafts (draft-only — no send)
 

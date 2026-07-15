@@ -14,6 +14,7 @@ import { registerReferenceTools } from './tools/reference.js';
 import { registerConversationTools } from './tools/conversations.js';
 import { registerMessageTools } from './tools/messages.js';
 import { registerDraftTools } from './tools/drafts.js';
+import { registerAttachmentTools } from './tools/attachments.js';
 import { registerContactTools } from './tools/contacts.js';
 import { registerManagementTools } from './tools/management.js';
 
@@ -47,6 +48,7 @@ async function main() {
   registerConversationTools(server, resolveClient);
   registerMessageTools(server, resolveClient);
   registerDraftTools(server, resolveClient);
+  registerAttachmentTools(server, resolveClient);
   registerContactTools(server, resolveClient);
   registerManagementTools(server, resolveClient);
 

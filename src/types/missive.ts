@@ -92,7 +92,13 @@ export interface Attachment {
   id: string;
   filename: string;
   size: number;
-  content_type: string;
+  content_type?: string;
+  extension?: string;
+  media_type?: string;
+  sub_type?: string;
+  url?: string;
+  width?: number;
+  height?: number;
 }
 
 export interface EmailAddress {

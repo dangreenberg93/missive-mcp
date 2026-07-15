@@ -51,6 +51,19 @@ When the thread is about a problem (short ship, delay, damage, EDI error):
 4. Draft externally: factual status + next step only
 5. Treat Voyager issue titles, assignees, and internal notes as **internal** — do not copy into the customer draft unless the user explicitly asks
 
+#### Attach PO / BOL from Missive email to Voyager order
+
+Fully automatable when both Missive MCP and Voyager MCP are enabled:
+
+1. **Missive:** `get_conversation_timeline` — find the message with the attachment; note `message_id`
+2. **Missive:** `list_message_attachments` — confirm attachment id, filename, category hint (PO, BOL, …)
+3. **Missive:** `download_attachment` — returns `file_base64` + `content_type`
+4. **Voyager:** `voyager_find_order` — resolve `order_id` from PO in subject/body
+5. **Voyager:** `voyager_list_attachment_categories` — category UUID
+6. **Voyager:** `voyager_attach_order_document` — pass `file_base64`, `file_name`, `content_type`
+
+No manual download from Missive UI required.
+
 #### Grounding rules (required)
 
 - Order status, ship/delivery dates, quantities, SKUs, and carrier info must come from **`voyager_get_order`** on this turn — never from memory or guesswork

@@ -22,6 +22,11 @@ import {
 } from '../cache.js';
 import { NotFoundError } from '../errors.js';
 import type { MissiveClient } from '../client.js';
+import {
+  normalizeMessagesResponse,
+  findMessageInConversation,
+} from '../message-fetch.js';
+import { summarizeAttachment } from '../attachment-utils.js';
 
 /**
  * Strip HTML tags and normalize whitespace
@@ -66,44 +71,6 @@ function processBody(
   }
 
   return processed;
-}
-
-function normalizeMessagesResponse(
-  data: MessageResponse | { messages: Message | Message[] }
-): Message[] {
-  const { messages } = data;
-  if (!messages) return [];
-  return Array.isArray(messages) ? messages : [messages];
-}
-
-async function findMessageInConversation(
-  client: MissiveClient,
-  conversationId: string,
-  messageId: string
-): Promise<Message | undefined> {
-  let cursor: string | undefined;
-
-  while (true) {
-    const params: { limit: number; until?: string } = { limit: 10 };
-    if (cursor) params.until = cursor;
-
-    const response = await client.get<{ messages: Message[] }>(
-      `/conversations/${conversationId}/messages`,
-      params
-    );
-
-    if (response.messages.length === 0) break;
-
-    const match = response.messages.find((m) => m.id === messageId);
-    if (match) return match;
-
-    if (response.messages.length < 10) break;
-
-    const last = response.messages[response.messages.length - 1];
-    cursor = String(last.delivered_at || 0);
-  }
-
-  return undefined;
 }
 
 async function hydrateMessageBodies(
@@ -175,12 +142,7 @@ function formatMessageResult(
     to_fields: message.to_fields,
     cc_fields: message.cc_fields,
     delivered_at: message.delivered_at,
-    attachments: message.attachments?.map((a) => ({
-      id: a.id,
-      filename: a.filename,
-      size: a.size,
-      content_type: a.content_type,
-    })),
+    attachments: message.attachments?.map(summarizeAttachment),
     conversation: message.conversation,
     ...(source === 'timeline' && !message.body
       ? { note: 'Full body unavailable via GET /messages; returned preview from conversation timeline' }
@@ -506,12 +468,7 @@ Use get_message with message_id and conversation_id if you need a single message
             from_field: m.from_field,
             to_fields: m.to_fields,
             delivered_at: m.delivered_at,
-            attachments: m.attachments?.map((a) => ({
-              id: a.id,
-              filename: a.filename,
-              size: a.size,
-              content_type: a.content_type,
-            })),
+            attachments: m.attachments?.map(summarizeAttachment),
           },
         });
       }
