@@ -7,7 +7,13 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import * as z from 'zod';
 import type { ClientResolver } from '../types/tools.js';
 import { RateLimitError } from '../errors.js';
-import type { DraftsResponse, DraftResponse, MessageResponse } from '../types/missive.js';
+import type { MissiveClient } from '../client.js';
+import type {
+  DraftsResponse,
+  DraftResponse,
+  MessageResponse,
+  UsersResponse,
+} from '../types/missive.js';
 
 /**
  * Rate limiter for send operations
@@ -155,6 +161,50 @@ function normalizeFromField(
     : { address: value.address };
 }
 
+type NormalizedFromField = { address: string; name?: string };
+
+/**
+ * The users list marks the token owner with me: true. That is how we know
+ * "Judenne generated this draft" when she uses her own Missive PAT.
+ */
+async function getAuthenticatedUserName(
+  client: MissiveClient
+): Promise<string | undefined> {
+  const limit = 200;
+  let offset = 0;
+  for (;;) {
+    const data = await client.get<UsersResponse>('/users', { limit, offset });
+    const me = data.users.find((u) => u.me);
+    if (me?.name) return me.name;
+    if (data.users.length < limit) return undefined;
+    offset += limit;
+  }
+}
+
+async function resolveFromField(
+  client: MissiveClient,
+  raw: FromFieldInput | undefined
+): Promise<NormalizedFromField | undefined> {
+  const from = normalizeFromField(raw);
+  if (!from || from.name) return from;
+  try {
+    const name = await getAuthenticatedUserName(client);
+    if (name) return { address: from.address, name };
+  } catch {
+    // Creating the draft still works if /users is unavailable
+  }
+  return from;
+}
+
+function addDefaultSignatureSchema() {
+  return z
+    .boolean()
+    .default(true)
+    .describe(
+      'Append the sending alias signature to the body (Missive default for compose). Uses the signature configured for from_field, including Liquid {{ user.first_name }} / {{ user.name }} from the authenticated user. Set false to skip.'
+    );
+}
+
 // Attachment schema
 const AttachmentSchema = z.object({
   base64_data: z.string().describe('Base64 encoded file data'),
@@ -221,7 +271,11 @@ The draft will be saved and can be viewed in Missive or sent later using send_me
 
 For replies, provide the conversation ID and the from/to addresses. For new messages, omit the conversation ID and use any from/to addresses specified by the user.
 
-To send from a Missive alias (not your login address), pass from_field as the alias email string, e.g. "ops@example.com", or as {address, name}. The address must match an account or alias on the authenticated Missive user.`,
+To send from a Missive alias (not your login address), pass from_field as the alias email string, e.g. "ops@example.com", or as {address, name}. The address must match an account or alias on the authenticated Missive user.
+
+If from_field has an address but no name, the authenticated user's Missive profile name is filled in (so a draft Judenne creates from ops@ shows From: Judenne <ops@...>).
+
+add_default_signature defaults to true and appends that alias's signature. Managed signatures that use {{ user.first_name }} / {{ user.name }} resolve to the token owner, not a shared ops identity.`,
       inputSchema: {
         // Recipients
         to_fields: z
@@ -246,6 +300,7 @@ To send from a Missive alias (not your login address), pass from_field as the al
           .optional()
           .describe('Conversation ID to reply to (omit for new conversation)'),
         from_field: fromFieldSchema,
+        add_default_signature: addDefaultSignatureSchema(),
         // Attachments
         attachments: z
           .array(AttachmentSchema)
@@ -255,7 +310,12 @@ To send from a Missive alias (not your login address), pass from_field as the al
       },
     },
     async (params, extra) => {
-      const data = await getClient(extra).post<DraftResponse>('/drafts', {
+      const client = getClient(extra);
+      const from_field = await resolveFromField(
+        client,
+        params.from_field as FromFieldInput | undefined
+      );
+      const data = await client.post<DraftResponse>('/drafts', {
         drafts: {
           to_fields: params.to_fields,
           cc_fields: params.cc_fields,
@@ -263,7 +323,8 @@ To send from a Missive alias (not your login address), pass from_field as the al
           subject: params.subject,
           body: params.body,
           conversation: params.conversation,
-          from_field: normalizeFromField(params.from_field as FromFieldInput | undefined),
+          from_field,
+          add_default_signature: params.add_default_signature,
           attachments: params.attachments,
           send: false,
         },
@@ -276,6 +337,8 @@ To send from a Missive alias (not your login address), pass from_field as the al
             text: JSON.stringify(
               {
                 draft: data.drafts[0],
+                from_field,
+                add_default_signature: params.add_default_signature,
                 message: 'Draft created successfully. Use send_message to send it.',
               },
               null,
@@ -315,6 +378,7 @@ Only the body content is required. The draft can be reviewed in Missive or sent 
           .optional()
           .describe('Additional CC recipients (merged with original if reply_all)'),
         from_field: fromFieldSchema,
+        add_default_signature: addDefaultSignatureSchema(),
         attachments: z
           .array(AttachmentSchema)
           .max(25)
@@ -362,7 +426,11 @@ Only the body content is required. The draft can be reviewed in Missive or sent 
           subject,
           body: params.body,
           conversation: msg.conversation,
-          from_field: normalizeFromField(params.from_field as FromFieldInput | undefined),
+          from_field: await resolveFromField(
+            client,
+            params.from_field as FromFieldInput | undefined
+          ),
+          add_default_signature: params.add_default_signature,
           attachments: params.attachments,
           send: false,
         },
@@ -431,6 +499,7 @@ For replies, provide the conversation ID. For new messages, omit it.`,
           .optional()
           .describe('Conversation ID to reply to (omit for new conversation)'),
         from_field: fromFieldSchema,
+        add_default_signature: addDefaultSignatureSchema(),
         // Attachments
         attachments: z
           .array(AttachmentSchema)
@@ -450,7 +519,12 @@ For replies, provide the conversation ID. For new messages, omit it.`,
         );
       }
 
-      const data = await getClient(extra).post<DraftResponse>('/drafts', {
+      const client = getClient(extra);
+      const from_field = await resolveFromField(
+        client,
+        params.from_field as FromFieldInput | undefined
+      );
+      const data = await client.post<DraftResponse>('/drafts', {
         drafts: {
           to_fields: params.to_fields,
           cc_fields: params.cc_fields,
@@ -458,7 +532,8 @@ For replies, provide the conversation ID. For new messages, omit it.`,
           subject: params.subject,
           body: params.body,
           conversation: params.conversation,
-          from_field: normalizeFromField(params.from_field as FromFieldInput | undefined),
+          from_field,
+          add_default_signature: params.add_default_signature,
           attachments: params.attachments,
           send: true,
         },

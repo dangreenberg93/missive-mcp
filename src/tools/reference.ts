@@ -132,7 +132,7 @@ export function registerReferenceTools(server: McpServer, getClient: ClientResol
     {
       title: 'List Users',
       description:
-        'Lists all users in organizations the authenticated user belongs to. Use this to find user IDs for assignments.',
+        'Lists users in organizations the authenticated user belongs to. The token owner has me: true. Use this to find user IDs for assignments.',
       inputSchema: {
         organization: z
           .string()
