@@ -66,11 +66,94 @@ function getRateLimiter(extra: { authInfo?: { extra?: Record<string, unknown> } 
   return limiter;
 }
 
-// Email field schema
-const EmailFieldSchema = z.object({
-  address: z.string().email().describe('Email address'),
-  name: z.string().optional().describe('Display name'),
-});
+/**
+ * Fresh email-address object schema.
+ *
+ * Do not reuse a single Zod object instance across fields. zod-to-json-schema
+ * emits `$ref: "#/properties/to_fields/items"` for later uses, and many MCP
+ * clients cannot resolve those refs, so they then reject every `from_field` value.
+ */
+function emailAddressObjectSchema() {
+  return z.object({
+    address: z
+      .string()
+      .email()
+      .describe('Email address, e.g. ops@example.com'),
+    name: z.string().optional().describe('Display name'),
+  });
+}
+
+function coerceFromField(val: unknown): unknown {
+  if (val == null || val === '') return undefined;
+
+  if (typeof val === 'string') {
+    const trimmed = val.trim();
+    if (
+      (trimmed.startsWith('{') && trimmed.endsWith('}')) ||
+      (trimmed.startsWith('[') && trimmed.endsWith(']'))
+    ) {
+      try {
+        return coerceFromField(JSON.parse(trimmed));
+      } catch {
+        return trimmed;
+      }
+    }
+    const angle = trimmed.match(/^(?:"?([^"<]*)"?\s*)?<([^<>]+@[^<>]+)>$/);
+    if (angle) {
+      const name = angle[1]?.trim();
+      const address = angle[2].trim();
+      return name ? { address, name } : { address };
+    }
+    return trimmed;
+  }
+
+  if (Array.isArray(val) && val.length === 1) {
+    return coerceFromField(val[0]);
+  }
+
+  if (typeof val === 'object') {
+    const obj = val as Record<string, unknown>;
+    const address = obj.address ?? obj.email;
+    if (typeof address === 'string' && address.trim()) {
+      const name =
+        typeof obj.name === 'string' && obj.name.trim()
+          ? obj.name.trim()
+          : undefined;
+      return name
+        ? { address: address.trim(), name }
+        : { address: address.trim() };
+    }
+  }
+
+  return val;
+}
+
+const fromFieldSchema = z.preprocess(
+  coerceFromField,
+  z
+    .union([
+      z
+        .string()
+        .email()
+        .describe('Sender email address, e.g. ops@example.com'),
+      emailAddressObjectSchema(),
+    ])
+    .optional()
+).describe(
+  'Sender email. Must match a Missive account or alias you can send from (e.g. ops@example.com). Pass the address as a string, or {address, name}. Uses your default account if omitted.'
+);
+
+type FromFieldInput = string | { address: string; name?: string };
+
+function normalizeFromField(
+  value: FromFieldInput | undefined
+): { address: string; name?: string } | undefined {
+  if (value == null || value === '') return undefined;
+  if (typeof value === 'string') return { address: value };
+  return value.name
+    ? { address: value.address, name: value.name }
+    : { address: value.address };
+}
 
 // Attachment schema
 const AttachmentSchema = z.object({
@@ -136,19 +219,21 @@ export function registerDraftTools(server: McpServer, getClient: ClientResolver)
 
 The draft will be saved and can be viewed in Missive or sent later using send_message.
 
-For replies, provide the conversation ID and the from/to addresses. For new messages, omit the conversation ID and use any from/to addresses specified by the user.`,
+For replies, provide the conversation ID and the from/to addresses. For new messages, omit the conversation ID and use any from/to addresses specified by the user.
+
+To send from a Missive alias (not your login address), pass from_field as the alias email string, e.g. "ops@example.com", or as {address, name}. The address must match an account or alias on the authenticated Missive user.`,
       inputSchema: {
         // Recipients
         to_fields: z
-          .array(EmailFieldSchema)
+          .array(emailAddressObjectSchema())
           .min(1)
           .describe('Primary recipients (required)'),
         cc_fields: z
-          .array(EmailFieldSchema)
+          .array(emailAddressObjectSchema())
           .optional()
           .describe('CC recipients'),
         bcc_fields: z
-          .array(EmailFieldSchema)
+          .array(emailAddressObjectSchema())
           .optional()
           .describe('BCC recipients'),
         // Content
@@ -160,9 +245,7 @@ For replies, provide the conversation ID and the from/to addresses. For new mess
           .uuid()
           .optional()
           .describe('Conversation ID to reply to (omit for new conversation)'),
-        from_field: EmailFieldSchema.optional().describe(
-          'Sender address (uses default if omitted)'
-        ),
+        from_field: fromFieldSchema,
         // Attachments
         attachments: z
           .array(AttachmentSchema)
@@ -180,7 +263,7 @@ For replies, provide the conversation ID and the from/to addresses. For new mess
           subject: params.subject,
           body: params.body,
           conversation: params.conversation,
-          from_field: params.from_field,
+          from_field: normalizeFromField(params.from_field as FromFieldInput | undefined),
           attachments: params.attachments,
           send: false,
         },
@@ -228,12 +311,10 @@ Only the body content is required. The draft can be reviewed in Missive or sent 
           .default(false)
           .describe('Include original CC recipients'),
         cc_fields: z
-          .array(EmailFieldSchema)
+          .array(emailAddressObjectSchema())
           .optional()
           .describe('Additional CC recipients (merged with original if reply_all)'),
-        from_field: EmailFieldSchema.optional().describe(
-          'Override sender (uses default if omitted)'
-        ),
+        from_field: fromFieldSchema,
         attachments: z
           .array(AttachmentSchema)
           .max(25)
@@ -281,7 +362,7 @@ Only the body content is required. The draft can be reviewed in Missive or sent 
           subject,
           body: params.body,
           conversation: msg.conversation,
-          from_field: params.from_field,
+          from_field: normalizeFromField(params.from_field as FromFieldInput | undefined),
           attachments: params.attachments,
           send: false,
         },
@@ -329,15 +410,15 @@ For replies, provide the conversation ID. For new messages, omit it.`,
       inputSchema: {
         // Recipients
         to_fields: z
-          .array(EmailFieldSchema)
+          .array(emailAddressObjectSchema())
           .min(1)
           .describe('Primary recipients (required)'),
         cc_fields: z
-          .array(EmailFieldSchema)
+          .array(emailAddressObjectSchema())
           .optional()
           .describe('CC recipients'),
         bcc_fields: z
-          .array(EmailFieldSchema)
+          .array(emailAddressObjectSchema())
           .optional()
           .describe('BCC recipients'),
         // Content
@@ -349,9 +430,7 @@ For replies, provide the conversation ID. For new messages, omit it.`,
           .uuid()
           .optional()
           .describe('Conversation ID to reply to (omit for new conversation)'),
-        from_field: EmailFieldSchema.optional().describe(
-          'Sender address (uses default if omitted)'
-        ),
+        from_field: fromFieldSchema,
         // Attachments
         attachments: z
           .array(AttachmentSchema)
@@ -379,7 +458,7 @@ For replies, provide the conversation ID. For new messages, omit it.`,
           subject: params.subject,
           body: params.body,
           conversation: params.conversation,
-          from_field: params.from_field,
+          from_field: normalizeFromField(params.from_field as FromFieldInput | undefined),
           attachments: params.attachments,
           send: true,
         },
