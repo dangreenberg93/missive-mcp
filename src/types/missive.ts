@@ -35,8 +35,6 @@ export interface User {
   email: string;
   name: string;
   organization: string;
-  /** true when this user owns the API token; omitted for everyone else */
-  me?: boolean;
 }
 
 export interface UsersResponse {
